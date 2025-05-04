@@ -1053,6 +1053,16 @@ class ModernYouTubeDownloader:
             on_click=lambda e, id=queue_item['id']: self.remove_from_queue(id),
         )
         
+        # Folder access button for this item
+        folder_button = ft.IconButton(
+            icon=ft.Icons.FOLDER_OPEN,
+            tooltip="Open download location",
+            icon_color="#4FC3F7",
+            icon_size=18,
+            on_click=lambda e, id=queue_item['id']: self.open_download_folder(id),
+            disabled=True,
+        )
+        
         # Expand/collapse button
         expand_button = ft.IconButton(
             icon=ft.Icons.EXPAND_MORE,
@@ -1134,6 +1144,7 @@ class ModernYouTubeDownloader:
                                 [
                                     download_button,
                                     pause_button,
+                                    folder_button,
                                     delete_button,
                                     expand_button,
                                 ],
@@ -1162,11 +1173,14 @@ class ModernYouTubeDownloader:
                 "status_text": status_text,
                 "download_button": download_button,
                 "pause_button": pause_button,
+                "folder_button": folder_button,
                 "delete_button": delete_button,
                 "expand_button": expand_button,
                 "details_section": details_section,
                 "progress_color": progress_color,
                 "is_expanded": False,
+                "download_path": queue_item['download_path'],
+                "output_file": None,  # Will store the output file path when download completes
             },
         )
         
@@ -1504,6 +1518,45 @@ class ModernYouTubeDownloader:
         
         # Re-enable UI
         self.enable_ui_after_download()
+        
+        # Show a popup to open the folder (optional)
+        self.show_folder_option(file_path)
+        
+    def show_folder_option(self, file_path):
+        """Show an option to open the downloaded file's folder"""
+        def close_dialog(e):
+            dialog.open = False
+            self.page.update()
+            
+        def open_folder(e):
+            try:
+                if os.path.exists(file_path):
+                    folder_path = os.path.dirname(file_path)
+                    if sys.platform == "win32":
+                        os.system(f'explorer /select,"{file_path}"')
+                    elif sys.platform == "darwin":
+                        os.system(f'open -R "{file_path}"')
+                    else:
+                        os.system(f'xdg-open "{folder_path}"')
+                close_dialog(e)
+            except Exception as e:
+                self.status_text.value = f"Error opening folder: {str(e)}"
+                self.update_ui()
+                close_dialog(e)
+                
+        dialog = ft.AlertDialog(
+            title=ft.Text("Download Complete"),
+            content=ft.Text(f"File saved: {os.path.basename(file_path)}"),
+            actions=[
+                ft.TextButton("Open Folder", on_click=open_folder),
+                ft.TextButton("Close", on_click=close_dialog),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        
+        self.page.dialog = dialog
+        dialog.open = True
+        self.page.update()
 
     def format_size(self, bytes):
         """Format bytes to human readable size"""
@@ -1938,6 +1991,8 @@ class ModernYouTubeDownloader:
             # Update status
             self.update_queue_item_status(item_id, "Starting download...", "#1976D2")
             
+            output_file = None
+            
             if download_type == "video":
                 # Download video
                 output_template = os.path.join(download_path, f"{filename_base}.%(ext)s")
@@ -1957,21 +2012,33 @@ class ModernYouTubeDownloader:
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     # Check if download was cancelled during setup
-                    if self.active_downloads[item_id]['status'] == 'cancelled':
+                    if item_id in self.active_downloads and self.active_downloads[item_id]['status'] == 'cancelled':
                         return
                         
+                    # Get info to determine output file
+                    info_dict = ydl.extract_info(url, download=False)
+                    temp_output_file = ydl.prepare_filename(info_dict)
+                        
+                    # Start the download
                     ydl.download([url])
                     
                     # Check if download was cancelled during download
-                    if self.active_downloads[item_id]['status'] == 'cancelled':
+                    if item_id in self.active_downloads and self.active_downloads[item_id]['status'] == 'cancelled':
                         return
-                        
-                    # Get the actual output filename from the info dict
-                    info_dict = ydl.extract_info(url, download=False)
-                    output_file = ydl.prepare_filename(info_dict)
+                    
+                    # Determine the actual output file (it might have changed extension)
+                    possible_extensions = ['mp4', 'webm', 'mkv']
+                    for ext in possible_extensions:
+                        test_path = os.path.splitext(temp_output_file)[0] + f".{ext}"
+                        if os.path.exists(test_path):
+                            output_file = test_path
+                            break
+                    
+                    if not output_file and os.path.exists(temp_output_file):
+                        output_file = temp_output_file
                     
                     # Mark as complete
-                    self.complete_queue_item(item_id, os.path.basename(output_file))
+                    self.complete_queue_item(item_id, os.path.basename(output_file) if output_file else "Unknown file", output_file)
                 
             elif download_type == "audio":
                 # Audio (MP3)
@@ -1994,20 +2061,25 @@ class ModernYouTubeDownloader:
                     
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         # Check if download was cancelled
-                        if self.active_downloads[item_id]['status'] == 'cancelled':
+                        if item_id in self.active_downloads and self.active_downloads[item_id]['status'] == 'cancelled':
                             return
+                        
+                        # Get info to determine output file
+                        info_dict = ydl.extract_info(url, download=False)
+                        temp_output_file = ydl.prepare_filename(info_dict)
                             
+                        # Start the download
                         ydl.download([url])
                         
                         # Check if download was cancelled during download
-                        if self.active_downloads[item_id]['status'] == 'cancelled':
+                        if item_id in self.active_downloads and self.active_downloads[item_id]['status'] == 'cancelled':
                             return
                         
-                    # The output file will have .mp3 extension
-                    output_file = os.path.join(download_path, f"{filename_base}.mp3")
-                    
-                    # Mark as complete
-                    self.complete_queue_item(item_id, os.path.basename(output_file))
+                        # The output file will have .mp3 extension
+                        output_file = os.path.splitext(temp_output_file)[0] + ".mp3"
+                        
+                        # Mark as complete
+                        self.complete_queue_item(item_id, os.path.basename(output_file) if os.path.exists(output_file) else "Unknown file", output_file)
                 else:
                     # Without ffmpeg, just download the best audio
                     ydl_opts = {
@@ -2021,21 +2093,22 @@ class ModernYouTubeDownloader:
                     
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         # Check if download was cancelled
-                        if self.active_downloads[item_id]['status'] == 'cancelled':
+                        if item_id in self.active_downloads and self.active_downloads[item_id]['status'] == 'cancelled':
                             return
+                        
+                        # Get info to determine output file
+                        info_dict = ydl.extract_info(url, download=False)
+                        output_file = ydl.prepare_filename(info_dict)
                             
+                        # Start the download
                         ydl.download([url])
                         
                         # Check if download was cancelled during download
-                        if self.active_downloads[item_id]['status'] == 'cancelled':
+                        if item_id in self.active_downloads and self.active_downloads[item_id]['status'] == 'cancelled':
                             return
                         
-                    # Get the actual output filename
-                    info_dict = ydl.extract_info(url, download=False)
-                    output_file = ydl.prepare_filename(info_dict)
-                    
-                    # Mark as complete
-                    self.complete_queue_item(item_id, os.path.basename(output_file))
+                        # Mark as complete
+                        self.complete_queue_item(item_id, os.path.basename(output_file) if os.path.exists(output_file) else "Unknown file", output_file)
                 
             else:  # audio_hq
                 # High quality audio (M4A)
@@ -2058,20 +2131,25 @@ class ModernYouTubeDownloader:
                     
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         # Check if download was cancelled
-                        if self.active_downloads[item_id]['status'] == 'cancelled':
+                        if item_id in self.active_downloads and self.active_downloads[item_id]['status'] == 'cancelled':
                             return
+                        
+                        # Get info to determine output file
+                        info_dict = ydl.extract_info(url, download=False)
+                        temp_output_file = ydl.prepare_filename(info_dict)
                             
+                        # Start the download
                         ydl.download([url])
                         
                         # Check if download was cancelled during download
-                        if self.active_downloads[item_id]['status'] == 'cancelled':
+                        if item_id in self.active_downloads and self.active_downloads[item_id]['status'] == 'cancelled':
                             return
                         
-                    # The output file will have .m4a extension
-                    output_file = os.path.join(download_path, f"{filename_base}.m4a")
-                    
-                    # Mark as complete
-                    self.complete_queue_item(item_id, os.path.basename(output_file))
+                        # The output file will have .m4a extension
+                        output_file = os.path.splitext(temp_output_file)[0] + ".m4a"
+                        
+                        # Mark as complete
+                        self.complete_queue_item(item_id, os.path.basename(output_file) if os.path.exists(output_file) else "Unknown file", output_file)
                 else:
                     # Without ffmpeg, just download the best audio
                     ydl_opts = {
@@ -2085,21 +2163,22 @@ class ModernYouTubeDownloader:
                     
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         # Check if download was cancelled
-                        if self.active_downloads[item_id]['status'] == 'cancelled':
+                        if item_id in self.active_downloads and self.active_downloads[item_id]['status'] == 'cancelled':
                             return
+                        
+                        # Get info to determine output file
+                        info_dict = ydl.extract_info(url, download=False)
+                        output_file = ydl.prepare_filename(info_dict)
                             
+                        # Start the download
                         ydl.download([url])
                         
                         # Check if download was cancelled during download
-                        if self.active_downloads[item_id]['status'] == 'cancelled':
+                        if item_id in self.active_downloads and self.active_downloads[item_id]['status'] == 'cancelled':
                             return
                         
-                    # Get the actual output filename
-                    info_dict = ydl.extract_info(url, download=False)
-                    output_file = ydl.prepare_filename(info_dict)
-                    
-                    # Mark as complete
-                    self.complete_queue_item(item_id, os.path.basename(output_file))
+                        # Mark as complete
+                        self.complete_queue_item(item_id, os.path.basename(output_file) if os.path.exists(output_file) else "Unknown file", output_file)
                 
         except Exception as e:
             # Update with error
@@ -2146,7 +2225,8 @@ class ModernYouTubeDownloader:
         # Update UI
         self.update_ui()
 
-    def complete_queue_item(self, item_id, filename):
+    def complete_queue_item(self, item_id, filename, output_file=None):
+        """Mark a queue item as completed and enable folder access"""
         # Find the UI container
         container = self.get_queue_control_by_id(item_id)
         if not container:
@@ -2158,6 +2238,7 @@ class ModernYouTubeDownloader:
         progress_bar = container.data["progress_bar"]
         download_button = container.data["download_button"]
         pause_button = container.data["pause_button"]
+        folder_button = container.data["folder_button"]
         
         # Set progress to 100%
         progress_bar.value = 1.0
@@ -2169,6 +2250,11 @@ class ModernYouTubeDownloader:
         # Update button states
         download_button.disabled = True
         pause_button.disabled = True
+        folder_button.disabled = False
+        
+        # Save output file path for folder access
+        if output_file:
+            container.data["output_file"] = output_file
         
         # Remove from active downloads
         if item_id in self.active_downloads:
@@ -2178,16 +2264,24 @@ class ModernYouTubeDownloader:
         self.update_ui()
 
     def queue_progress_hook(self, d, item_id):
+        """Progress hook for queue downloads with improved pause handling"""
         # Check if app is closing
         if self.is_closing:
             return
             
         # Check if download is paused
         if item_id in self.active_downloads and self.active_downloads[item_id]['status'] == 'paused':
-            # This is a simple approach - it would be better to actually pause the download
-            # but yt-dlp doesn't have a built-in pause functionality, so we'd need to implement
-            # a more sophisticated approach with process control
-            time.sleep(0.5)  # Slow down processing while paused
+            # When paused, we'll keep updating the UI but with a "paused" indicator
+            # yt-dlp doesn't have native pause, but this will show the user the download is paused
+            # and the download thread handles the actual slow-down when paused
+            if not self.is_closing:
+                if d['status'] == 'downloading' and 'total_bytes' in d and d['total_bytes'] > 0:
+                    percentage = d['downloaded_bytes'] / d['total_bytes']
+                    # Only update the progress, not the status text (to keep "Paused" visible)
+                    self.update_queue_item_progress(item_id, percentage * 100)
+            # Slow down processing while paused to reduce CPU usage
+            time.sleep(0.5)
+            return
             
         if d['status'] == 'downloading':
             # Get download percentage
@@ -2284,6 +2378,46 @@ class ModernYouTubeDownloader:
     def update_ui(self):
         """Wrapper for page.update() that uses the safe method"""
         self.safe_update_ui()
+
+    def open_download_folder(self, item_id):
+        """Open the folder where downloaded file is stored"""
+        try:
+            # Find the UI container
+            container = self.get_queue_control_by_id(item_id)
+            if not container:
+                return
+                
+            # Get file path information
+            download_path = container.data.get("download_path")
+            output_file = container.data.get("output_file")
+            
+            # If we have a specific file, open its folder with the file selected
+            if output_file and os.path.exists(output_file):
+                if sys.platform == "win32":
+                    # On Windows, use explorer to select the file
+                    os.system(f'explorer /select,"{output_file}"')
+                elif sys.platform == "darwin":
+                    # On macOS, use Finder
+                    os.system(f'open -R "{output_file}"')
+                else:
+                    # On Linux, just open the folder
+                    if os.path.exists(download_path):
+                        os.system(f'xdg-open "{download_path}"')
+            else:
+                # Just open the folder if file doesn't exist or we don't know which file
+                if os.path.exists(download_path):
+                    if sys.platform == "win32":
+                        os.system(f'explorer "{download_path}"')
+                    elif sys.platform == "darwin":
+                        os.system(f'open "{download_path}"')
+                    else:
+                        os.system(f'xdg-open "{download_path}"')
+                else:
+                    self.status_text.value = "Download folder not found."
+                    self.update_ui()
+        except Exception as e:
+            self.status_text.value = f"Error opening folder: {str(e)}"
+            self.update_ui()
 
 def main(page: ft.Page):
     app = ModernYouTubeDownloader(page)
