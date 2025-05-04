@@ -1,2 +1,5 @@
 flet>=0.7.0
 pytube>=12.1.0
+youtube-search-python==1.4.6
+httpx==0.25.0
+

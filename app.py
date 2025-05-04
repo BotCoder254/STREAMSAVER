@@ -3,12 +3,43 @@ import os
 import re
 import time
 import subprocess
-from threading import Thread
+from threading import Thread, Lock
 from pathlib import Path
 from datetime import datetime
 import yt_dlp
 from pytubefix import YouTube
-from youtubesearchpython import VideosSearch
+import traceback
+
+# Import the YouTube search library
+try:
+    from youtubesearchpython import VideosSearch
+except ImportError:
+    # If not installed, inform the user
+    print("YouTube Search Python library not installed. Please install it with: pip install youtube-search-python==1.4.6")
+
+# Create a workaround for the proxies issue
+import sys
+import importlib.util
+if 'youtubesearchpython' in sys.modules:
+    # Try to patch the library - this is a workaround for the proxies issue
+    try:
+        # This will patch any methods that might be using 'proxies' parameter
+        import httpx
+        
+        # Save the original post method
+        original_post = httpx.post
+        
+        # Create a wrapper that removes 'proxies' from kwargs
+        def patched_post(*args, **kwargs):
+            if 'proxies' in kwargs:
+                del kwargs['proxies']
+            return original_post(*args, **kwargs)
+        
+        # Replace the httpx.post with our patched version
+        httpx.post = patched_post
+        print("Successfully patched httpx.post to fix 'proxies' issue")
+    except Exception as e:
+        print(f"Failed to patch httpx for YouTube search: {e}")
 
 
 class ModernYouTubeDownloader:
@@ -19,6 +50,8 @@ class ModernYouTubeDownloader:
         self.countdown_timer = None
         self.countdown_value = 3
         self.active_downloads = {}  # Track active downloads by queue item ID
+        self.update_lock = Lock()  # Add lock for thread-safe updates
+        self.is_closing = False    # Flag to track if the app is closing
         self.setup_page()
         self.init_controls()
         self.build_ui()
@@ -30,7 +63,7 @@ class ModernYouTubeDownloader:
         self.has_ffmpeg = self.check_ffmpeg()
         if not self.has_ffmpeg:
             self.status_text.value = "Warning: ffmpeg not found. Audio conversion features will be limited."
-            self.page.update()
+            self.update_ui()
 
     def setup_page(self):
         self.page.title = "StreamSaver Pro"
@@ -593,7 +626,7 @@ class ModernYouTubeDownloader:
             # Show spinner with countdown
             self.spinner_row.visible = True
             self.status_text.value = "Preparing to fetch video information..."
-            self.page.update()
+            self.update_ui()
             
             # Start countdown
             self.countdown_value = 3
@@ -604,14 +637,14 @@ class ModernYouTubeDownloader:
             Thread(target=self.fetch_video_info, args=(url,)).start()
         else:
             self.status_text.value = "Invalid URL. Please enter a supported video URL"
-            self.page.update()
+            self.update_ui()
 
     def update_countdown_text(self):
         if not self.countdown_timer:
             return
             
         self.spinner_row.controls[1].value = f"Fetching video info... {self.countdown_value}"
-        self.page.update()
+        self.update_ui()
         
         if self.countdown_value > 0:
             self.countdown_value -= 1
@@ -640,7 +673,7 @@ class ModernYouTubeDownloader:
         self.countdown_timer = False
         # Hide search results container when resetting
         self.search_results_container.visible = False
-        self.page.update()
+        self.update_ui()
 
     def fetch_video_info(self, url):
         try:
@@ -668,34 +701,57 @@ class ModernYouTubeDownloader:
                         'ext': info.get('ext', 'mp4')
                     }
                     
-                    # Update UI with video information - don't return from the method call
-                    self.update_video_info(
-                        self.current_video_info['title'], 
-                        self.current_video_info['uploader'], 
-                        self.format_duration(self.current_video_info['duration']), 
-                        self.current_video_info['thumbnail']
-                    )
-                    
-                    # Enable download options
-                    self.enable_download_options()
-                    
+                    # Update UI with video information in a thread-safe manner
+                    try:
+                        self.update_video_info(
+                            self.current_video_info['title'], 
+                            self.current_video_info['uploader'], 
+                            self.format_duration(self.current_video_info['duration']), 
+                            self.current_video_info['thumbnail']
+                        )
+                        
+                        # Enable download options
+                        self.enable_download_options()
+                    except Exception as ui_error:
+                        print(f"UI update error: {str(ui_error)}")
+                        print(traceback.format_exc())
                 else:
                     self.show_error("Could not fetch video information. Please check URL.")
             
         except Exception as e:
+            print(f"Error fetching video info: {str(e)}")
+            print(traceback.format_exc())
             self.show_error(f"Error fetching video information: {str(e)}")
 
     def update_video_info(self, title, author, length, thumbnail_url):
-        self.spinner_row.visible = False
-        self.countdown_timer = False
-        
-        self.video_title.value = title
-        self.video_author.value = f"By: {author}"
-        self.video_length.value = f"Duration: {length}"
-        self.thumbnail.src = thumbnail_url
-        self.thumbnail.visible = True
-        self.status_text.value = "Video information loaded successfully"
-        self.page.update()
+        """Update UI with video information in a thread-safe manner"""
+        try:
+            self.spinner_row.visible = False
+            self.countdown_timer = False
+            
+            self.video_title.value = title
+            self.video_author.value = f"By: {author}"
+            self.video_length.value = f"Duration: {length}"
+            self.thumbnail.src = thumbnail_url
+            self.thumbnail.visible = True
+            self.status_text.value = "Video information loaded successfully"
+            self.update_ui()
+        except Exception as e:
+            print(f"Error updating video info UI: {str(e)}")
+            print(traceback.format_exc())
+            
+    def show_error(self, message):
+        """Display error message in a thread-safe manner"""
+        try:
+            self.status_text.value = message
+            self.progress_bar.value = 0
+            self.progress_bar.visible = False
+            
+            # Re-enable UI
+            self.enable_ui_after_download()
+        except Exception as e:
+            print(f"Error showing error message: {str(e)}")
+            print(traceback.format_exc())
 
     def enable_download_options(self):
         self.download_type.disabled = False
@@ -705,7 +761,7 @@ class ModernYouTubeDownloader:
         self.download_type.on_change = self.on_download_type_change
         
         self.status_text.value = "Select download options"
-        self.page.update()
+        self.update_ui()
 
     def on_download_type_change(self, e):
         if self.download_type.value == "video":
@@ -721,13 +777,13 @@ class ModernYouTubeDownloader:
             
         self.download_button.disabled = False
         self.queue_button.disabled = False
-        self.page.update()
+        self.update_ui()
 
     def browse_directory(self, e):
         def pick_folder_result(e: ft.FilePickerResultEvent):
             if e.path:
                 self.download_path.value = e.path
-                self.page.update()
+                self.update_ui()
 
         picker = ft.FilePicker(on_result=pick_folder_result)
         self.page.overlay.append(picker)
@@ -737,14 +793,14 @@ class ModernYouTubeDownloader:
     def add_to_queue(self, e):
         if not self.url_input.value or not self.download_type.value or not self.current_video_info:
             self.status_text.value = "Please fill in all required fields"
-            self.page.update()
+            self.update_ui()
             return
             
         # Check that user has selected a format
         if (self.download_type.value == "video" and not self.video_quality.value) or \
            (self.download_type.value in ["audio", "audio_hq"] and not self.audio_quality.value):
             self.status_text.value = "Please select quality before adding to queue"
-            self.page.update()
+            self.update_ui()
             return
             
         # Prepare queue item data
@@ -766,11 +822,11 @@ class ModernYouTubeDownloader:
         
         # Update queue count
         self.queue_count.value = f"Queue: {len(self.video_queue)} items"
-        self.page.update()
+        self.update_ui()
         
         # Show notification
         self.status_text.value = "Added to download queue"
-        self.page.update()
+        self.update_ui()
         
         # Reset for next video
         self.url_input.value = ""
@@ -958,7 +1014,7 @@ class ModernYouTubeDownloader:
         )
         
         self.queue_list.controls.append(item)
-        self.page.update()
+        self.update_ui()
         
     def toggle_item_details(self, item_id):
         # Find the UI container
@@ -984,7 +1040,7 @@ class ModernYouTubeDownloader:
             container.data["is_expanded"] = True
             
         # Update UI
-        self.page.update()
+        self.update_ui()
 
     def generate_random_color(self):
         """Generate a random color for progress bars to differentiate queue items"""
@@ -1031,12 +1087,12 @@ class ModernYouTubeDownloader:
                 
         # Update queue count
         self.queue_count.value = f"Queue: {len(self.video_queue)} items"
-        self.page.update()
+        self.update_ui()
 
     def start_download(self, e):
         if not self.url_input.value or not self.download_type.value or not self.current_video_info:
             self.status_text.value = "Please fill in all required fields"
-            self.page.update()
+            self.update_ui()
             return
             
         # Disable UI during download
@@ -1066,7 +1122,7 @@ class ModernYouTubeDownloader:
         self.queue_button.disabled = True
         self.progress_bar.visible = True
         self.status_text.value = "Preparing download..."
-        self.page.update()
+        self.update_ui()
 
     def enable_ui_after_download(self):
         self.url_input.disabled = False
@@ -1079,7 +1135,7 @@ class ModernYouTubeDownloader:
         self.browse_button.disabled = False
         self.download_button.disabled = False
         self.queue_button.disabled = False
-        self.page.update()
+        self.update_ui()
 
     def download_media(self, video_info, download_type, quality, download_path):
         try:
@@ -1278,24 +1334,16 @@ class ModernYouTubeDownloader:
             
     def update_progress(self, percentage):
         self.progress_bar.value = percentage / 100  # Progress bar expects value between 0 and 1
-        self.page.update()
+        self.update_ui()
 
     def update_status(self, message):
         self.status_text.value = message
-        self.page.update()
+        self.update_ui()
 
     def download_complete(self, file_path):
         # Show completion status
         self.progress_bar.value = 1  # Set progress bar to 100%
         self.status_text.value = f"Download complete: {os.path.basename(file_path)}"
-        
-        # Re-enable UI
-        self.enable_ui_after_download()
-
-    def show_error(self, message):
-        self.status_text.value = message
-        self.progress_bar.value = 0
-        self.progress_bar.visible = False
         
         # Re-enable UI
         self.enable_ui_after_download()
@@ -1353,23 +1401,29 @@ class ModernYouTubeDownloader:
         
         if not search_term:
             self.status_text.value = "Please enter a search term"
-            self.page.update()
+            self.update_ui()
             return
             
         # Show loading indicator
         self.status_text.value = "Searching YouTube..."
         self.search_results_container.visible = False
-        self.page.update()
+        self.update_ui()
         
         # Start search in a separate thread
         Thread(target=self.perform_youtube_search, args=(search_term,)).start()
     
     def perform_youtube_search(self, search_term):
         try:
-            # Use youtube-search-python to search for videos
-            search = VideosSearch(search_term, limit=10)
-            results = search.result()
+            # Initialize search with version 1.4.6 of the library
+            videos_search = VideosSearch(search_term, limit=10)
             
+            # Get results
+            results = videos_search.result()
+            
+            # Verify we can still update the UI before proceeding
+            if self.is_closing:
+                return
+                
             # Clear previous results
             self.search_results_container.content.controls.clear()
             
@@ -1386,10 +1440,14 @@ class ModernYouTubeDownloader:
                 self.status_text.value = f"No results found for '{search_term}'"
                 
         except Exception as e:
-            self.search_results_container.visible = False
-            self.status_text.value = f"Search error: {str(e)}"
+            if not self.is_closing:
+                self.search_results_container.visible = False
+                self.status_text.value = f"Search error: {str(e)}"
+                print(f"Search error details: {traceback.format_exc()}")
             
-        self.page.update()
+        # Update UI only if app is still running
+        if not self.is_closing:
+            self.update_ui()
     
     def add_search_result_item(self, video):
         # Create a container for the search result item
@@ -1468,7 +1526,7 @@ class ModernYouTubeDownloader:
                 result_container.bgcolor = "#2a2a2a"
             else:
                 result_container.bgcolor = "#1a1a1a"
-            self.page.update()
+            self.update_ui()
             
         result_container.on_hover = on_hover
         
@@ -1550,7 +1608,7 @@ class ModernYouTubeDownloader:
         }
         
         # Update UI
-        self.page.update()
+        self.update_ui()
         
         # Start download in a thread
         Thread(target=self.download_queue_item, args=(queue_item, container)).start()
@@ -1587,7 +1645,7 @@ class ModernYouTubeDownloader:
                 pause_button.icon = ft.Icons.PLAY_ARROW
                 pause_button.tooltip = "Resume"
                 
-                self.page.update()
+                self.update_ui()
             elif self.active_downloads[item_id]['status'] == 'paused':
                 # Resume download
                 self.active_downloads[item_id]['status'] = 'downloading'
@@ -1607,7 +1665,7 @@ class ModernYouTubeDownloader:
                 pause_button.icon = ft.Icons.PAUSE
                 pause_button.tooltip = "Pause"
                 
-                self.page.update()
+                self.update_ui()
 
     def download_queue_item(self, queue_item, container):
         # Get UI elements
@@ -1808,7 +1866,7 @@ class ModernYouTubeDownloader:
                 
             download_button.disabled = False
             pause_button.disabled = True
-            self.page.update()
+            self.update_ui()
 
     def update_queue_item_status(self, item_id, status_message, color="#1976D2"):
         # Find the UI container
@@ -1824,7 +1882,7 @@ class ModernYouTubeDownloader:
         status_container.bgcolor = color
         
         # Update UI
-        self.page.update()
+        self.update_ui()
 
     def update_queue_item_progress(self, item_id, percentage):
         # Find the UI container
@@ -1841,7 +1899,7 @@ class ModernYouTubeDownloader:
             self.active_downloads[item_id]['progress'] = percentage
         
         # Update UI
-        self.page.update()
+        self.update_ui()
 
     def complete_queue_item(self, item_id, filename):
         # Find the UI container
@@ -1872,9 +1930,13 @@ class ModernYouTubeDownloader:
             del self.active_downloads[item_id]
         
         # Update UI
-        self.page.update()
+        self.update_ui()
 
     def queue_progress_hook(self, d, item_id):
+        # Check if app is closing
+        if self.is_closing:
+            return
+            
         # Check if download is paused
         if item_id in self.active_downloads and self.active_downloads[item_id]['status'] == 'paused':
             # This is a simple approach - it would be better to actually pause the download
@@ -1900,13 +1962,14 @@ class ModernYouTubeDownloader:
                         
                     status = f"DL: {percentage:.0%} | {speed} | ETA: {eta}"
                     
-                    # Only update if not paused
-                    if item_id not in self.active_downloads or self.active_downloads[item_id]['status'] != 'paused':
+                    # Only update if not paused and app is not closing
+                    if (item_id not in self.active_downloads or self.active_downloads[item_id]['status'] != 'paused') and not self.is_closing:
                         self.update_queue_item_status(item_id, status, "#1976D2")
                     
         elif d['status'] == 'finished':
-            # Update status
-            self.update_queue_item_status(item_id, "Processing...", "#1976D2")
+            # Update status if app is not closing
+            if not self.is_closing:
+                self.update_queue_item_status(item_id, "Processing...", "#1976D2")
 
     def display_url_mode(self):
         """Show URL input and hide search input"""
@@ -1915,7 +1978,7 @@ class ModernYouTubeDownloader:
         self.search_input.visible = False
         self.search_button.visible = False
         self.search_results_container.visible = False
-        self.page.update()
+        self.update_ui()
         
     def display_search_mode(self):
         """Show search input and hide URL input"""
@@ -1923,7 +1986,7 @@ class ModernYouTubeDownloader:
         self.url_submit_button.visible = False
         self.search_input.visible = True
         self.search_button.visible = True
-        self.page.update()
+        self.update_ui()
 
     def switch_to_url_mode(self, e=None):
         """Switch to URL input mode"""
@@ -1953,8 +2016,35 @@ class ModernYouTubeDownloader:
         # Switch visibility
         self.display_search_mode()
 
+    def safe_update_ui(self):
+        """Thread-safe method to update UI"""
+        try:
+            if not self.is_closing:
+                with self.update_lock:
+                    self.page.update()
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e):
+                # App is closing, set flag to prevent further updates
+                self.is_closing = True
+                print("App is closing, updates stopped")
+            else:
+                print(f"UI update error: {str(e)}")
+        except Exception as e:
+            print(f"Error updating UI: {str(e)}")
+            
+    def update_ui(self):
+        """Wrapper for page.update() that uses the safe method"""
+        self.safe_update_ui()
+
 def main(page: ft.Page):
     app = ModernYouTubeDownloader(page)
+    
+    # Handle app close event
+    def on_page_close(e):
+        app.is_closing = True
+        print("App is closing, cleaning up...")
+        
+    page.on_close = on_page_close
 
 # Run the app
 if __name__ == "__main__":
