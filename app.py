@@ -52,6 +52,13 @@ class ModernYouTubeDownloader:
         self.active_downloads = {}  # Track active downloads by queue item ID
         self.update_lock = Lock()  # Add lock for thread-safe updates
         self.is_closing = False    # Flag to track if the app is closing
+        
+        # Pagination variables
+        self.current_search_term = ""
+        self.current_page = 1
+        self.videos_search = None
+        self.has_more_pages = False
+        
         self.setup_page()
         self.init_controls()
         self.build_ui()
@@ -70,10 +77,92 @@ class ModernYouTubeDownloader:
         self.page.window_width = 1200
         self.page.window_height = 750
         self.page.window_resizable = True
+        self.page.window_min_width = 950  # Minimum width to ensure UI elements don't collapse
+        self.page.window_min_height = 600  # Minimum height to ensure UI elements don't collapse
         self.page.padding = 0
+        self.page.spacing = 0
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.bgcolor = "#0f0f0f"
+        
+        # Handle page resize event
+        self.page.on_resize = self.on_page_resize
+        
         self.page.update()
+        
+    def on_page_resize(self, e):
+        """Handle window resize event"""
+        try:
+            # Adjust UI elements based on window size if needed
+            width = self.page.window_width
+            height = self.page.window_height
+            
+            # Adjust left panel width based on window width
+            if width < 1100:
+                # Smaller screen, adjust left panel width
+                new_width = max(380, width * 0.35)  # Min width of 380px or 35% of window
+                
+                # Make sure there's still room for the queue panel
+                if new_width > width * 0.45:
+                    new_width = width * 0.45
+                
+                # Update left panel width
+                for control in self.page.controls:
+                    if isinstance(control, ft.Row) and hasattr(control, "controls"):
+                        for c in control.controls:
+                            if hasattr(c, "width") and isinstance(c, ft.Container) and c.width == 450:
+                                c.width = new_width
+                
+                # Also adjust the width of the search controls
+                if hasattr(self, "url_input"):
+                    self.url_input.width = max(250, new_width - 100)
+                    self.search_input.width = max(250, new_width - 100)
+                    self.search_results_container.width = new_width - 30
+                    self.thumbnail.width = max(250, new_width - 100)
+                    self.progress_bar.width = max(250, new_width - 100)
+                    self.status_text.width = max(250, new_width - 100)
+                    self.video_title.width = max(250, new_width - 100)
+                    self.video_author.width = max(250, new_width - 100)
+                    self.video_length.width = max(250, new_width - 100)
+            else:
+                # Restore normal width on larger screens
+                for control in self.page.controls:
+                    if isinstance(control, ft.Row) and hasattr(control, "controls"):
+                        for c in control.controls:
+                            if hasattr(c, "width") and isinstance(c, ft.Container) and c.width != 450 and c.width > 380:
+                                c.width = 450
+                
+                # Restore standard widths
+                if hasattr(self, "url_input"):
+                    self.url_input.width = 350
+                    self.search_input.width = 350
+                    self.search_results_container.width = 420
+                    self.thumbnail.width = 350
+                    self.progress_bar.width = 350
+                    self.status_text.width = 350
+                    self.video_title.width = 350
+                    self.video_author.width = 350
+                    self.video_length.width = 350
+            
+            # Adjust search results container height based on window height
+            if height < 700:
+                # On smaller screens, reduce the height of the search results
+                self.search_results_container.content.height = max(200, height - 500)
+            else:
+                # Restore normal height on larger screens
+                self.search_results_container.content.height = 300
+            
+            # Ensure the vertical divider has proper height
+            for control in self.page.controls:
+                if isinstance(control, ft.Row) and len(control.controls) > 1:
+                    for c in control.controls:
+                        if isinstance(c, ft.Container) and hasattr(c, "content") and isinstance(c.content, ft.VerticalDivider):
+                            # Ensure divider stretches properly
+                            c.height = None
+            
+            self.update_ui()
+        except Exception as e:
+            print(f"Error in resize handler: {str(e)}")
+            print(traceback.format_exc())
 
     def init_controls(self):
         # Tab-like buttons for mode switching
@@ -157,6 +246,47 @@ class ModernYouTubeDownloader:
             icon_size=20,
             on_click=self.search_youtube,
             visible=False,  # Initially hidden
+        )
+
+        # Pagination controls for search results
+        self.prev_page_button = ft.IconButton(
+            icon=ft.Icons.ARROW_BACK,
+            tooltip="Previous Page",
+            icon_color="white",
+            bgcolor="#333333",
+            icon_size=18,
+            on_click=self.load_prev_page,
+            disabled=True,
+            visible=False,
+        )
+        
+        self.next_page_button = ft.IconButton(
+            icon=ft.Icons.ARROW_FORWARD,
+            tooltip="Next Page",
+            icon_color="white",
+            bgcolor="#ff0000",
+            icon_size=18,
+            on_click=self.load_next_page,
+            disabled=True,
+            visible=False,
+        )
+        
+        self.page_text = ft.Text(
+            "Page 1",
+            size=14,
+            color="white",
+            visible=False,
+        )
+        
+        self.pagination_row = ft.Row(
+            [
+                self.prev_page_button,
+                self.page_text,
+                self.next_page_button,
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+            spacing=10,
+            visible=False,
         )
 
         # Search results container
@@ -450,6 +580,9 @@ class ModernYouTubeDownloader:
                                     padding=ft.padding.only(bottom=10),
                                 ),
                                 
+                                # Pagination controls
+                                self.pagination_row,
+                                
                                 # Search results
                                 self.search_results_container,
                             ],
@@ -542,11 +675,14 @@ class ModernYouTubeDownloader:
                 ],
                 spacing=0,
                 scroll=ft.ScrollMode.AUTO,
+                expand=True,
             ),
             padding=20,
             bgcolor="#0f0f0f",
             border_radius=ft.border_radius.all(0),
-            width=450,  # Increased width to accommodate search
+            width=450,  # Fixed width to accommodate search
+            alignment=ft.alignment.top_left,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
         )
 
         # Right panel - Queue list
@@ -584,17 +720,29 @@ class ModernYouTubeDownloader:
             padding=20,
             bgcolor="#0f0f0f",
             expand=True,
+            alignment=ft.alignment.top_left,
         )
 
         # Main content - two-panel layout
         main_content = ft.Row(
             [
                 left_panel,
-                ft.VerticalDivider(width=1, color="#333333"),
+                ft.Container(
+                    content=ft.VerticalDivider(
+                        width=1,
+                        color="#333333",
+                        thickness=1,
+                    ),
+                    height=None,  # Let it stretch to full height
+                    margin=ft.margin.all(0),
+                    padding=ft.padding.all(0),
+                ),
                 right_panel,
             ],
             expand=True,
             spacing=0,
+            alignment=ft.MainAxisAlignment.START,
+            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
         )
 
         # Footer
@@ -607,9 +755,17 @@ class ModernYouTubeDownloader:
         # Add all sections to the page
         self.page.add(
             header,
-            ft.Divider(height=1, color="#333333"),
+            ft.Container(
+                content=ft.Divider(height=1, color="#333333"),
+                margin=ft.margin.all(0),
+                padding=ft.padding.all(0),
+            ),
             main_content,
-            ft.Divider(height=1, color="#333333"),
+            ft.Container(
+                content=ft.Divider(height=1, color="#333333"),
+                margin=ft.margin.all(0),
+                padding=ft.padding.all(0),
+            ),
             footer,
         )
 
@@ -673,6 +829,7 @@ class ModernYouTubeDownloader:
         self.countdown_timer = False
         # Hide search results container when resetting
         self.search_results_container.visible = False
+        self.pagination_row.visible = False
         self.update_ui()
 
     def fetch_video_info(self, url):
@@ -1403,10 +1560,17 @@ class ModernYouTubeDownloader:
             self.status_text.value = "Please enter a search term"
             self.update_ui()
             return
+        
+        # If new search term, reset pagination
+        if search_term != self.current_search_term:
+            self.current_search_term = search_term
+            self.current_page = 1
+            self.videos_search = None
             
         # Show loading indicator
         self.status_text.value = "Searching YouTube..."
         self.search_results_container.visible = False
+        self.pagination_row.visible = False
         self.update_ui()
         
         # Start search in a separate thread
@@ -1415,10 +1579,11 @@ class ModernYouTubeDownloader:
     def perform_youtube_search(self, search_term):
         try:
             # Initialize search with version 1.4.6 of the library
-            videos_search = VideosSearch(search_term, limit=10)
-            
+            if self.videos_search is None:
+                self.videos_search = VideosSearch(search_term, limit=10)
+                
             # Get results
-            results = videos_search.result()
+            results = self.videos_search.result()
             
             # Verify we can still update the UI before proceeding
             if self.is_closing:
@@ -1434,21 +1599,101 @@ class ModernYouTubeDownloader:
                 
                 # Show results container
                 self.search_results_container.visible = True
-                self.status_text.value = f"Found {len(results['result'])} results for '{search_term}'"
+                
+                # Update page text
+                self.page_text.value = f"Page {self.current_page}"
+                
+                # Update pagination controls visibility
+                self.pagination_row.visible = True
+                self.prev_page_button.visible = True
+                self.next_page_button.visible = True
+                self.page_text.visible = True
+                
+                # Enable/disable pagination buttons based on current state
+                self.prev_page_button.disabled = self.current_page <= 1
+                
+                # Check if there are more pages
+                self.has_more_pages = len(results['result']) == 10  # If we got the full requested amount
+                self.next_page_button.disabled = not self.has_more_pages
+                
+                self.status_text.value = f"Found {len(results['result'])} results for '{search_term}' (Page {self.current_page})"
             else:
                 self.search_results_container.visible = False
+                self.pagination_row.visible = False
                 self.status_text.value = f"No results found for '{search_term}'"
                 
         except Exception as e:
             if not self.is_closing:
                 self.search_results_container.visible = False
+                self.pagination_row.visible = False
                 self.status_text.value = f"Search error: {str(e)}"
                 print(f"Search error details: {traceback.format_exc()}")
             
         # Update UI only if app is still running
         if not self.is_closing:
             self.update_ui()
+            
+    def load_next_page(self, e=None):
+        """Load the next page of search results"""
+        if not self.has_more_pages or not self.videos_search:
+            return
+            
+        try:
+            # Show loading indicator
+            self.status_text.value = "Loading next page..."
+            self.search_results_container.visible = False
+            self.pagination_row.visible = False
+            self.update_ui()
+            
+            # Use next() method to go to the next page
+            more_results = self.videos_search.next()
+            
+            if more_results:
+                self.current_page += 1
+                # Fetch the new page of results
+                self.perform_youtube_search(self.current_search_term)
+            else:
+                self.has_more_pages = False
+                self.next_page_button.disabled = True
+                self.status_text.value = "No more results available"
+                self.update_ui()
+        except Exception as e:
+            self.status_text.value = f"Error loading next page: {str(e)}"
+            print(f"Next page error: {traceback.format_exc()}")
+            self.update_ui()
     
+    def load_prev_page(self, e=None):
+        """Load the previous page of search results"""
+        if self.current_page <= 1 or not self.videos_search:
+            return
+            
+        try:
+            # For previous page, we need to reset and iterate forward
+            self.status_text.value = "Loading previous page..."
+            self.search_results_container.visible = False
+            self.pagination_row.visible = False
+            self.update_ui()
+            
+            # Reset search and iterate to the desired page
+            target_page = self.current_page - 1
+            self.videos_search = VideosSearch(self.current_search_term, limit=10)
+            self.current_page = 1
+            
+            # Advance to the target page
+            while self.current_page < target_page:
+                more_results = self.videos_search.next()
+                if more_results:
+                    self.current_page += 1
+                else:
+                    break
+                    
+            # Now display the current page
+            self.perform_youtube_search(self.current_search_term)
+        except Exception as e:
+            self.status_text.value = f"Error loading previous page: {str(e)}"
+            print(f"Previous page error: {traceback.format_exc()}")
+            self.update_ui()
+
     def add_search_result_item(self, video):
         # Create a container for the search result item
         title = video.get('title', 'Unknown Title')
@@ -1978,6 +2223,7 @@ class ModernYouTubeDownloader:
         self.search_input.visible = False
         self.search_button.visible = False
         self.search_results_container.visible = False
+        self.pagination_row.visible = False
         self.update_ui()
         
     def display_search_mode(self):
@@ -1986,6 +2232,9 @@ class ModernYouTubeDownloader:
         self.url_submit_button.visible = False
         self.search_input.visible = True
         self.search_button.visible = True
+        # Don't show results container or pagination yet
+        self.search_results_container.visible = False
+        self.pagination_row.visible = False
         self.update_ui()
 
     def switch_to_url_mode(self, e=None):
