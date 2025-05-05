@@ -2643,37 +2643,83 @@ class ModernYouTubeDownloader:
             
             # Create torrent details section if it's a torrent
             details_section = None
+            file_sections = {}
             if item_type == "torrent" and torrent:
                 details = torrent.get_details()
                 
-                # Create file selection checkboxes
+                # Calculate total size of selected files
+                total_size = sum(f['size'] for f in details['files'] if f['selected'])
+                
+                # Create collapsible file sections
                 file_list = ft.Column(
-                    [
-                        ft.Row(
-                            [
-                                ft.Checkbox(
-                                    value=f['selected'],
-                                    on_change=lambda e, i=i: self.update_file_selection(
-                                        item_id,
-                                        [idx for idx, file in enumerate(details['files']) 
-                                         if (idx == i and e.control.value) or 
-                                            (idx != i and file['selected'])]
-                                    ),
-                                ),
-                                ft.Text(
-                                    f"{os.path.basename(f['path'])} ({f.get('size_str', 'Unknown')})",
-                                    size=12,
-                                    color="#bbbbbb",
-                                    expand=True,
-                                ),
-                            ],
-                            spacing=5,
-                        ) for i, f in enumerate(details['files'])
-                    ],
                     spacing=2,
                     scroll=ft.ScrollMode.AUTO,
                     height=min(len(details['files']) * 30, 150),
                 )
+                
+                # Group files by extension
+                grouped_files = {}
+                for i, f in enumerate(details['files']):
+                    ext = os.path.splitext(f['path'])[1].lower() or 'Other'
+                    if ext not in grouped_files:
+                        grouped_files[ext] = []
+                    grouped_files[ext].append((i, f))
+                
+                # Create sections for each file type
+                for ext, files in grouped_files.items():
+                    # Create section header
+                    header_row = ft.Row(
+                        [
+                            ft.IconButton(
+                                icon=ft.Icons.EXPAND_MORE,
+                                icon_size=20,
+                                data={'section': ext, 'expanded': True},
+                                on_click=lambda e: self.toggle_queue_section(item_id, e.control.data['section']),
+                            ),
+                            ft.Text(
+                                f"{ext.upper()} Files ({len(files)})",
+                                size=14,
+                                weight=ft.FontWeight.BOLD,
+                                color="#bbbbbb",
+                            ),
+                        ],
+                        spacing=5,
+                    )
+                    
+                    # Create section content
+                    section_content = ft.Column(
+                        [
+                            ft.Row(
+                                [
+                                    ft.Checkbox(
+                                        value=f[1]['selected'],
+                                        data={'index': f[0]},
+                                        on_change=lambda e, idx=f[0]: self.update_queue_file_selection(
+                                            item_id,
+                                            idx,
+                                            e.control.value
+                                        ),
+                                    ),
+                                    ft.Text(
+                                        f"{os.path.basename(f[1]['path'])} ({f[1].get('size_str', 'Unknown')})",
+                                        size=12,
+                                        color="#bbbbbb",
+                                        expand=True,
+                                    ),
+                                ],
+                                spacing=5,
+                            ) for f in files
+                        ],
+                        spacing=2,
+                        visible=True,
+                    )
+                    
+                    file_sections[ext] = {
+                        'header': header_row,
+                        'content': section_content,
+                    }
+                    
+                    file_list.controls.extend([header_row, section_content])
                 
                 # Create priority dropdown
                 priority_dropdown = ft.Dropdown(
@@ -2693,7 +2739,7 @@ class ModernYouTubeDownloader:
                     [
                         ft.Row(
                             [
-                                ft.Text(f"Size: {details['size']}", size=12, color="#bbbbbb"),
+                                ft.Text(f"Size: {self._format_size(total_size)}", size=12, color="#bbbbbb"),
                                 ft.Text(f"Seeds: {details['seeds']}", size=12, color="#bbbbbb"),
                                 ft.Text(f"Peers: {details['peers']}", size=12, color="#bbbbbb"),
                                 ft.Text(f"Ratio: {details['ratio']}", size=12, color="#bbbbbb"),
@@ -2703,7 +2749,18 @@ class ModernYouTubeDownloader:
                         ft.Container(
                             content=ft.Column(
                                 [
-                                    ft.Text("Select Files:", size=12, color="#bbbbbb"),
+                                    ft.Row(
+                                        [
+                                            ft.IconButton(
+                                                icon=ft.Icons.EXPAND_MORE,
+                                                icon_size=20,
+                                                data={'expanded': True},
+                                                on_click=lambda e: self.toggle_files_section(item_id, e.control),
+                                            ),
+                                            ft.Text("Selected Files:", size=12, color="#bbbbbb"),
+                                        ],
+                                        spacing=5,
+                                    ),
                                     file_list,
                                 ],
                                 spacing=5,
@@ -2790,7 +2847,8 @@ class ModernYouTubeDownloader:
                 "pause_button": pause_button,
                 "stop_button": stop_button,
                 "download_path": download_path,
-                "torrent": torrent
+                "torrent": torrent,
+                "file_sections": file_sections
             }
             
             return container
@@ -2798,143 +2856,74 @@ class ModernYouTubeDownloader:
         except Exception as e:
             print(f"Error creating queue item: {str(e)}")
             return None
-            
-    def update_file_selection(self, item_id, selected_indices):
-        """Update selected files for a torrent"""
+
+    def toggle_queue_section(self, item_id, section):
+        """Toggle visibility of a file section in queue item"""
+        try:
+            container = self.get_queue_control_by_id(item_id)
+            if container and container.data["file_sections"]:
+                sections = container.data["file_sections"]
+                if section in sections:
+                    section_data = sections[section]
+                    header = section_data['header']
+                    content = section_data['content']
+                    
+                    # Toggle visibility
+                    content.visible = not content.visible
+                    
+                    # Update icon
+                    header.controls[0].icon = ft.Icons.EXPAND_LESS if content.visible else ft.Icons.EXPAND_MORE
+                    
+                    self.update_ui()
+        except Exception as e:
+            print(f"Error toggling queue section: {str(e)}")
+
+    def update_queue_file_selection(self, item_id, file_index, selected):
+        """Update file selection in queue item"""
         try:
             container = self.get_queue_control_by_id(item_id)
             if container and container.data["type"] == "torrent":
                 torrent = container.data["torrent"]
                 if torrent:
+                    # Get current selected indices
+                    selected_indices = [i for i, f in enumerate(torrent.files) if f['selected']]
+                    
+                    # Update selection
+                    if selected and file_index not in selected_indices:
+                        selected_indices.append(file_index)
+                    elif not selected and file_index in selected_indices:
+                        selected_indices.remove(file_index)
+                    
+                    # Update torrent
                     torrent.select_files(selected_indices)
-                    # Update status if no files are selected
+                    
+                    # Update total size display
+                    details = torrent.get_details()
+                    total_size = sum(f['size'] for f in details['files'] if f['selected'])
+                    
+                    # Update size text
+                    details_section = container.content.controls[-1]
+                    if isinstance(details_section, ft.Column):
+                        size_text = details_section.controls[0].controls[0]
+                        size_text.value = f"Size: {self._format_size(total_size)}"
+                    
+                    # Update status if no files selected
                     if not selected_indices:
                         container.data["status_text"].value = "No files selected"
                         container.data["status_container"].bgcolor = "#FFA000"
-                    self.update_ui()
-                    
-        except Exception as e:
-            print(f"Error updating file selection: {str(e)}")
-            
-    def remove_from_queue(self, item_id):
-        """Remove an item from the queue"""
-        try:
-            # Stop the download if it's active
-            self.stop_download(item_id)
-            
-            # Remove from queue list
-            for i, item in enumerate(self.video_queue):
-                if item['id'] == item_id:
-                    # Get the container
-                    container = self.get_queue_control_by_id(item_id)
-                    if container and container.data["type"] == "torrent":
-                        # Stop the torrent if it's running
-                        torrent = container.data["torrent"]
-                        if torrent:
-                            torrent.stop()
-                    
-                    self.video_queue.pop(i)
-                    break
-            
-            # Remove from UI
-            for i, control in enumerate(self.queue_list.controls):
-                if control.key == item_id:
-                    self.queue_list.controls.pop(i)
-                    break
-            
-            # Update queue count
-            self.queue_count.value = f"Queue: {len(self.video_queue)} items"
-            self.update_ui()
-            
-        except Exception as e:
-            print(f"Error removing from queue: {str(e)}")
-            
-    def start_torrent_download(self, item_id, container):
-        """Start a torrent download"""
-        try:
-            torrent = container.data["torrent"]
-            if not torrent:
-                return
-                
-            # Check if any files are selected
-            if not any(f['selected'] for f in torrent.files):
-                container.data["status_text"].value = "No files selected"
-                container.data["status_container"].bgcolor = "#FFA000"
-                container.data["pause_button"].disabled = True
-                container.data["stop_button"].disabled = True
-                self.update_ui()
-                return
-                
-            # Mark as downloading
-            self.active_downloads[item_id] = {"status": "downloading"}
-            
-            def download_loop():
-                try:
-                    # Start the torrent
-                    torrent.start()
-                    
-                    # Update progress until complete or cancelled
-                    while (
-                        item_id in self.active_downloads
-                        and self.active_downloads[item_id]["status"] != "cancelled"
-                        and torrent.progress < 100
-                    ):
-                        if not torrent.is_paused:
-                            # Update progress
-                            container.data["progress_bar"].value = torrent.progress / 100
-                            
-                            # Update status text
-                            details = torrent.get_details()
-                            status = f"Downloading: {details['progress']} | ↓ {details['download_speed']} ↑ {details['upload_speed']} | Seeds: {details['seeds']} | ETA: {details['estimated_time']}"
-                            container.data["status_text"].value = status
-                            
-                            # Update status color
-                            container.data["status_container"].bgcolor = "#1976D2"
-                            
-                            self.update_ui()
-                            
-                        time.sleep(0.5)
-                    
-                    # Check if cancelled
-                    if (
-                        item_id not in self.active_downloads
-                        or self.active_downloads[item_id]["status"] == "cancelled"
-                    ):
-                        container.data["status_text"].value = "Cancelled"
-                        container.data["status_container"].bgcolor = "#757575"
-                    else:
-                        container.data["status_text"].value = "Completed"
-                        container.data["status_container"].bgcolor = "#43A047"
-                        container.data["progress_bar"].value = 1
-                    
-                    # Cleanup
-                    if item_id in self.active_downloads:
-                        del self.active_downloads[item_id]
-                    
-                    # Disable controls
-                    container.data["pause_button"].disabled = True
-                    container.data["stop_button"].disabled = True
                     
                     self.update_ui()
-                    
-                    # Start next download
-                    self.start_next_download()
-                    
-                except Exception as e:
-                    print(f"Error in torrent download loop: {str(e)}")
-                    container.data["status_text"].value = f"Error: {str(e)}"
-                    container.data["status_container"].bgcolor = "#E53935"
-                    self.update_ui()
-            
-            # Start download thread
-            Thread(target=download_loop, daemon=True).start()
-            
         except Exception as e:
-            print(f"Error starting torrent download: {str(e)}")
-            container.data["status_text"].value = f"Error: {str(e)}"
-            container.data["status_container"].bgcolor = "#E53935"
-            self.update_ui()
-    
+            print(f"Error updating queue file selection: {str(e)}")
+
+    def _format_size(self, size):
+        """Format size to human readable format"""
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < 1024.0:
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} PB"
+
     def pause_download(self, item_id):
         """Pause/Resume a download"""
         try:
@@ -3045,6 +3034,113 @@ class ModernYouTubeDownloader:
         except Exception as e:
             print(f"Error starting next download: {str(e)}")
             
+    def start_torrent_download(self, item_id, container):
+        """Start a torrent download"""
+        try:
+            torrent = container.data["torrent"]
+            if not torrent:
+                return
+                
+            # Check if any files are selected
+            if not any(f['selected'] for f in torrent.files):
+                container.data["status_text"].value = "No files selected"
+                container.data["status_container"].bgcolor = "#FFA000"
+                container.data["pause_button"].disabled = True
+                container.data["stop_button"].disabled = True
+                self.update_ui()
+                return
+                
+            # Mark as downloading
+            self.active_downloads[item_id] = {"status": "downloading"}
+            
+            def download_loop():
+                try:
+                    # Start the torrent
+                    torrent.start()
+                    
+                    # Update progress until complete or cancelled
+                    while (
+                        item_id in self.active_downloads
+                        and self.active_downloads[item_id]["status"] != "cancelled"
+                        and torrent.progress < 100
+                    ):
+                        if not torrent.is_paused:
+                            # Update progress
+                            container.data["progress_bar"].value = torrent.progress / 100
+                            
+                            # Update status text
+                            details = torrent.get_details()
+                            status = f"Downloading: {details['progress']} | ↓ {details['download_speed']} ↑ {details['upload_speed']} | Seeds: {details['seeds']} | ETA: {details['estimated_time']}"
+                            container.data["status_text"].value = status
+                            
+                            # Update status color
+                            container.data["status_container"].bgcolor = "#1976D2"
+                            
+                            self.update_ui()
+                            
+                        time.sleep(0.5)
+                    
+                    # Check if cancelled
+                    if (
+                        item_id not in self.active_downloads
+                        or self.active_downloads[item_id]["status"] == "cancelled"
+                    ):
+                        container.data["status_text"].value = "Cancelled"
+                        container.data["status_container"].bgcolor = "#757575"
+                    else:
+                        container.data["status_text"].value = "Completed"
+                        container.data["status_container"].bgcolor = "#43A047"
+                        container.data["progress_bar"].value = 1
+                    
+                    # Cleanup
+                    if item_id in self.active_downloads:
+                        del self.active_downloads[item_id]
+                    
+                    # Disable controls
+                    container.data["pause_button"].disabled = True
+                    container.data["stop_button"].disabled = True
+                    
+                    self.update_ui()
+                    
+                    # Start next download
+                    self.start_next_download()
+                    
+                except Exception as e:
+                    print(f"Error in torrent download loop: {str(e)}")
+                    container.data["status_text"].value = f"Error: {str(e)}"
+                    container.data["status_container"].bgcolor = "#E53935"
+                    self.update_ui()
+            
+            # Start download thread
+            Thread(target=download_loop, daemon=True).start()
+            
+        except Exception as e:
+            print(f"Error starting torrent download: {str(e)}")
+            container.data["status_text"].value = f"Error: {str(e)}"
+            container.data["status_container"].bgcolor = "#E53935"
+            self.update_ui()
+
+    def toggle_files_section(self, item_id, button):
+        """Toggle visibility of the files section"""
+        try:
+            container = self.get_queue_control_by_id(item_id)
+            if container and container.data["type"] == "torrent":
+                details_section = container.content.controls[-1]
+                if isinstance(details_section, ft.Column):
+                    files_container = details_section.controls[1]
+                    file_list = files_container.content.controls[1]
+                    
+                    # Toggle visibility
+                    file_list.visible = not file_list.visible
+                    
+                    # Update icon
+                    button.icon = ft.Icons.EXPAND_LESS if file_list.visible else ft.Icons.EXPAND_MORE
+                    button.data['expanded'] = file_list.visible
+                    
+                    self.update_ui()
+        except Exception as e:
+            print(f"Error toggling files section: {str(e)}")
+
 def main(page: ft.Page):
     app = ModernYouTubeDownloader(page)
     
