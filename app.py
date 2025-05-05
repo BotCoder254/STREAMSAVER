@@ -2641,6 +2641,85 @@ class ModernYouTubeDownloader:
                 on_click=lambda e: self.open_download_folder(item_id),
             )
             
+            # Create torrent details section if it's a torrent
+            details_section = None
+            if item_type == "torrent" and torrent:
+                details = torrent.get_details()
+                
+                # Create file selection checkboxes
+                file_list = ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Checkbox(
+                                    value=f['selected'],
+                                    on_change=lambda e, i=i: self.update_file_selection(
+                                        item_id,
+                                        [idx for idx, file in enumerate(details['files']) 
+                                         if (idx == i and e.control.value) or 
+                                            (idx != i and file['selected'])]
+                                    ),
+                                ),
+                                ft.Text(
+                                    f"{os.path.basename(f['path'])} ({f.get('size_str', 'Unknown')})",
+                                    size=12,
+                                    color="#bbbbbb",
+                                    expand=True,
+                                ),
+                            ],
+                            spacing=5,
+                        ) for i, f in enumerate(details['files'])
+                    ],
+                    spacing=2,
+                    scroll=ft.ScrollMode.AUTO,
+                    height=min(len(details['files']) * 30, 150),
+                )
+                
+                # Create priority dropdown
+                priority_dropdown = ft.Dropdown(
+                    label="Priority",
+                    value=torrent.priority,
+                    options=[
+                        ft.dropdown.Option("Normal"),
+                        ft.dropdown.Option("High"),
+                        ft.dropdown.Option("Low"),
+                    ],
+                    on_change=lambda e: self.update_torrent_priority(item_id, e.control.value),
+                    width=100,
+                    text_size=12,
+                )
+                
+                details_section = ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Text(f"Size: {details['size']}", size=12, color="#bbbbbb"),
+                                ft.Text(f"Seeds: {details['seeds']}", size=12, color="#bbbbbb"),
+                                ft.Text(f"Peers: {details['peers']}", size=12, color="#bbbbbb"),
+                                ft.Text(f"Ratio: {details['ratio']}", size=12, color="#bbbbbb"),
+                            ],
+                            spacing=10,
+                        ),
+                        ft.Container(
+                            content=ft.Column(
+                                [
+                                    ft.Text("Select Files:", size=12, color="#bbbbbb"),
+                                    file_list,
+                                ],
+                                spacing=5,
+                            ),
+                            bgcolor="#111111",
+                            padding=5,
+                            border_radius=5,
+                        ),
+                        ft.Row(
+                            [priority_dropdown],
+                            spacing=10,
+                        ),
+                    ],
+                    spacing=5,
+                )
+            
             # Create item container
             container = ft.Container(
                 content=ft.Column(
@@ -2691,6 +2770,7 @@ class ModernYouTubeDownloader:
                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                         ),
                         progress_bar,
+                        details_section if details_section else ft.Container(),
                     ],
                     spacing=5,
                 ),
@@ -2718,39 +2798,71 @@ class ModernYouTubeDownloader:
         except Exception as e:
             print(f"Error creating queue item: {str(e)}")
             return None
-
-    def start_next_download(self):
-        """Start the next download in the queue"""
+            
+    def update_file_selection(self, item_id, selected_indices):
+        """Update selected files for a torrent"""
         try:
-            # Find the next queued item
-            for item in self.video_queue:
-                if item["status"] == "queued":
-                    container = item["container"]
-                    item_id = item["id"]
-                    
-                    # Update status
-                    container.data["status_text"].value = "Starting..."
-                    container.data["status_container"].bgcolor = "#1976D2"
-                    container.data["pause_button"].disabled = False
-                    container.data["stop_button"].disabled = False
+            container = self.get_queue_control_by_id(item_id)
+            if container and container.data["type"] == "torrent":
+                torrent = container.data["torrent"]
+                if torrent:
+                    torrent.select_files(selected_indices)
+                    # Update status if no files are selected
+                    if not selected_indices:
+                        container.data["status_text"].value = "No files selected"
+                        container.data["status_container"].bgcolor = "#FFA000"
                     self.update_ui()
                     
-                    # Start download based on type
-                    if item["type"] == "torrent":
-                        self.start_torrent_download(item_id, container)
-                    else:
-                        self.start_video_download(item_id, container)
-                    
-                    break
-                    
         except Exception as e:
-            print(f"Error starting next download: {str(e)}")
-    
+            print(f"Error updating file selection: {str(e)}")
+            
+    def remove_from_queue(self, item_id):
+        """Remove an item from the queue"""
+        try:
+            # Stop the download if it's active
+            self.stop_download(item_id)
+            
+            # Remove from queue list
+            for i, item in enumerate(self.video_queue):
+                if item['id'] == item_id:
+                    # Get the container
+                    container = self.get_queue_control_by_id(item_id)
+                    if container and container.data["type"] == "torrent":
+                        # Stop the torrent if it's running
+                        torrent = container.data["torrent"]
+                        if torrent:
+                            torrent.stop()
+                    
+                    self.video_queue.pop(i)
+                    break
+            
+            # Remove from UI
+            for i, control in enumerate(self.queue_list.controls):
+                if control.key == item_id:
+                    self.queue_list.controls.pop(i)
+                    break
+            
+            # Update queue count
+            self.queue_count.value = f"Queue: {len(self.video_queue)} items"
+            self.update_ui()
+            
+        except Exception as e:
+            print(f"Error removing from queue: {str(e)}")
+            
     def start_torrent_download(self, item_id, container):
         """Start a torrent download"""
         try:
             torrent = container.data["torrent"]
             if not torrent:
+                return
+                
+            # Check if any files are selected
+            if not any(f['selected'] for f in torrent.files):
+                container.data["status_text"].value = "No files selected"
+                container.data["status_container"].bgcolor = "#FFA000"
+                container.data["pause_button"].disabled = True
+                container.data["stop_button"].disabled = True
+                self.update_ui()
                 return
                 
             # Mark as downloading
@@ -2772,7 +2884,8 @@ class ModernYouTubeDownloader:
                             container.data["progress_bar"].value = torrent.progress / 100
                             
                             # Update status text
-                            status = f"Downloading: {torrent.progress:.1f}% | ↓ {self.format_speed(torrent.download_speed)} ↑ {self.format_speed(torrent.upload_speed)}"
+                            details = torrent.get_details()
+                            status = f"Downloading: {details['progress']} | ↓ {details['download_speed']} ↑ {details['upload_speed']} | Seeds: {details['seeds']} | ETA: {details['estimated_time']}"
                             container.data["status_text"].value = status
                             
                             # Update status color
@@ -2893,6 +3006,45 @@ class ModernYouTubeDownloader:
         else:
             return f"{bytes_per_sec/(1024*1024):.1f} MB/s"
 
+    def update_torrent_priority(self, item_id, priority):
+        """Update torrent priority"""
+        try:
+            container = self.get_queue_control_by_id(item_id)
+            if container and container.data["type"] == "torrent":
+                torrent = container.data["torrent"]
+                if torrent:
+                    torrent.set_priority(priority)
+                    
+        except Exception as e:
+            print(f"Error updating torrent priority: {str(e)}")
+
+    def start_next_download(self):
+        """Start the next download in the queue"""
+        try:
+            # Find the next queued item
+            for item in self.video_queue:
+                if item["status"] == "queued":
+                    container = item["container"]
+                    item_id = item["id"]
+                    
+                    # Update status
+                    container.data["status_text"].value = "Starting..."
+                    container.data["status_container"].bgcolor = "#1976D2"
+                    container.data["pause_button"].disabled = False
+                    container.data["stop_button"].disabled = False
+                    self.update_ui()
+                    
+                    # Start download based on type
+                    if item["type"] == "torrent":
+                        self.start_torrent_download(item_id, container)
+                    else:
+                        self.start_video_download(item_id, container)
+                    
+                    break
+                    
+        except Exception as e:
+            print(f"Error starting next download: {str(e)}")
+            
 def main(page: ft.Page):
     app = ModernYouTubeDownloader(page)
     
