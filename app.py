@@ -10,6 +10,13 @@ import yt_dlp
 from pytubefix import YouTube
 import traceback
 
+# Import settings module
+try:
+    from settings import SettingsPanel
+except ImportError:
+    print("Settings module not found. Some features may not be available.")
+    SettingsPanel = None
+
 # Import the YouTube search library
 try:
     from youtubesearchpython import VideosSearch
@@ -59,6 +66,11 @@ class ModernYouTubeDownloader:
         self.videos_search = None
         self.has_more_pages = False
         
+        # Initialize settings panel if available
+        self.settings_panel = None
+        if SettingsPanel:
+            self.settings_panel = SettingsPanel(page, self.handle_settings_action)
+        
         self.setup_page()
         self.init_controls()
         self.build_ui()
@@ -71,6 +83,11 @@ class ModernYouTubeDownloader:
         if not self.has_ffmpeg:
             self.status_text.value = "Warning: ffmpeg not found. Audio conversion features will be limited."
             self.update_ui()
+            
+    def handle_settings_action(self, action_data):
+        """Handle settings panel actions"""
+        # Currently just used for callbacks from settings panel
+        pass
 
     def setup_page(self):
         self.page.title = "StreamSaver Pro"
@@ -444,7 +461,7 @@ class ModernYouTubeDownloader:
         self.video_author = ft.Text(
             value="", 
             size=14,
-            color="#bbbbbb",
+            color="#bbbbbb", 
             width=350,
             overflow=ft.TextOverflow.ELLIPSIS,
             max_lines=1,
@@ -538,8 +555,10 @@ class ModernYouTubeDownloader:
                         weight=ft.FontWeight.BOLD,
                         color="white",
                     ),
+                    # Add settings button if available
+                    self.settings_panel.get_settings_button() if self.settings_panel else ft.Container(width=0),
                 ],
-                alignment=ft.MainAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN if self.settings_panel else ft.MainAxisAlignment.CENTER,
             ),
             padding=15,
             bgcolor="#0f0f0f",
@@ -768,6 +787,10 @@ class ModernYouTubeDownloader:
             ),
             footer,
         )
+        
+        # Add settings panel to page overlay if available
+        if self.settings_panel:
+            self.page.overlay.append(self.settings_panel.get_settings_panel())
 
     def validate_url(self, e=None):
         url = self.url_input.value
@@ -1345,8 +1368,8 @@ class ModernYouTubeDownloader:
                 # Get the actual output filename from the info dict
                 info_dict = ydl.extract_info(url, download=False)
                 output_file = ydl.prepare_filename(info_dict)
-                
-                # Update status on completion
+                    
+                    # Update status on completion
                 self.download_complete(output_file)
                 
             elif download_type == "audio":
@@ -1484,8 +1507,8 @@ class ModernYouTubeDownloader:
             # Get download percentage
             if 'total_bytes' in d and d['total_bytes'] > 0:
                 percentage = d['downloaded_bytes'] / d['total_bytes']
-                
-                # Update progress bar
+        
+        # Update progress bar
                 self.update_progress(percentage * 100)
                 
                 # Update status with download speed and ETA
@@ -1502,7 +1525,7 @@ class ModernYouTubeDownloader:
         elif d['status'] == 'finished':
             # Update status
             self.update_status("Download finished. Processing file...")
-            
+
     def update_progress(self, percentage):
         self.progress_bar.value = percentage / 100  # Progress bar expects value between 0 and 1
         self.update_ui()
@@ -1518,7 +1541,7 @@ class ModernYouTubeDownloader:
         
         # Re-enable UI
         self.enable_ui_after_download()
-        
+
         # Show a popup to open the folder (optional)
         self.show_folder_option(file_path)
         
