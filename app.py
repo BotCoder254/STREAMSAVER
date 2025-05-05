@@ -48,6 +48,9 @@ if 'youtubesearchpython' in sys.modules:
     except Exception as e:
         print(f"Failed to patch httpx for YouTube search: {e}")
 
+# Import torrent panel
+from torrent_panel import TorrentPanel
+
 
 class ModernYouTubeDownloader:
     def __init__(self, page: ft.Page):
@@ -71,6 +74,9 @@ class ModernYouTubeDownloader:
         if SettingsPanel:
             self.settings_panel = SettingsPanel(page, self.handle_settings_action)
         
+        # Initialize torrent panel
+        self.torrent_panel = TorrentPanel(page, self.handle_settings_action)
+        
         self.setup_page()
         self.init_controls()
         self.build_ui()
@@ -86,8 +92,48 @@ class ModernYouTubeDownloader:
             
     def handle_settings_action(self, action_data):
         """Handle settings panel actions"""
-        # Currently just used for callbacks from settings panel
-        pass
+        try:
+            if action_data.get("type") == "add_to_queue":
+                item = action_data.get("item")
+                if item and item.get("type") == "torrent":
+                    # Create a unique ID for the queue item
+                    item_id = f"torrent_{len(self.video_queue)}"
+                    
+                    # Create the queue item container
+                    queue_item = self.create_queue_item(
+                        item_id=item_id,
+                        title=item["title"],
+                        download_path=item["download_path"],
+                        item_type="torrent",
+                        torrent=item["torrent"]
+                    )
+                    
+                    # Add to queue
+                    self.video_queue.append({
+                        "id": item_id,
+                        "container": queue_item,
+                        "type": "torrent",
+                        "torrent": item["torrent"],
+                        "status": "queued"
+                    })
+                    
+                    # Add to queue list
+                    self.queue_list.controls.append(queue_item)
+                    self.update_ui()
+                    
+                    # Start download if it's the only item
+                    if len(self.video_queue) == 1:
+                        self.start_next_download()
+            
+            elif action_data.get("type") == "status":
+                # Update status message
+                self.status_text.value = action_data.get("message", "")
+                self.update_ui()
+                
+        except Exception as e:
+            print(f"Error handling action: {str(e)}")
+            self.status_text.value = f"Error: {str(e)}"
+            self.update_ui()
 
     def setup_page(self):
         self.page.title = "StreamSaver Pro"
@@ -555,10 +601,23 @@ class ModernYouTubeDownloader:
                         weight=ft.FontWeight.BOLD,
                         color="white",
                     ),
-                    # Add settings button if available
-                    self.settings_panel.get_settings_button() if self.settings_panel else ft.Container(width=0),
+                    ft.Row(
+                        [
+                            # Add torrent button
+                            ft.IconButton(
+                                icon=ft.Icons.DOWNLOAD_ROUNDED,
+                                tooltip="Torrent Downloader",
+                                icon_color="white",
+                                icon_size=24,
+                                on_click=self.toggle_torrent_panel,
+                            ),
+                            # Settings button if available
+                            self.settings_panel.get_settings_button() if self.settings_panel else ft.Container(width=0),
+                        ],
+                        spacing=10,
+                    ),
                 ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN if self.settings_panel else ft.MainAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             ),
             padding=15,
             bgcolor="#0f0f0f",
@@ -2441,6 +2500,398 @@ class ModernYouTubeDownloader:
         except Exception as e:
             self.status_text.value = f"Error opening folder: {str(e)}"
             self.update_ui()
+
+    def toggle_torrent_panel(self, e=None):
+        """Toggle the torrent panel visibility"""
+        if not hasattr(self, '_torrent_panel_visible'):
+            self._torrent_panel_visible = False
+            
+        self._torrent_panel_visible = not self._torrent_panel_visible
+        
+        # Find the main content row
+        main_content = None
+        for control in self.page.controls:
+            if isinstance(control, ft.Row) and len(control.controls) >= 2:
+                main_content = control
+                break
+                
+        if main_content:
+            if self._torrent_panel_visible:
+                # Create a container for the torrent panel
+                torrent_section = ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.Container(
+                                content=ft.Row(
+                                    [
+                                        ft.Text(
+                                            "Torrent Downloads",
+                                            size=18,
+                                            weight=ft.FontWeight.BOLD,
+                                            color="white",
+                                        ),
+                                        ft.IconButton(
+                                            icon=ft.Icons.CLOSE,
+                                            icon_color="white",
+                                            tooltip="Close Torrent Panel",
+                                            on_click=self.toggle_torrent_panel,
+                                        ),
+                                    ],
+                                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                ),
+                                padding=10,
+                                bgcolor="#1a1a1a",
+                                border_radius=ft.border_radius.only(
+                                    top_left=8,
+                                    top_right=8,
+                                ),
+                            ),
+                            self.torrent_panel.get_panel(),
+                            ft.Divider(height=1, color="#333333"),
+                        ],
+                        spacing=0,
+                    ),
+                    padding=0,
+                    margin=ft.margin.only(bottom=10),
+                )
+                
+                # Get the left panel (first control)
+                left_panel = main_content.controls[0]
+                
+                # Store the original content
+                if not hasattr(self, '_original_left_content'):
+                    self._original_left_content = left_panel.content
+                
+                # Create a new column with torrent panel and original content
+                left_panel.content = ft.Column(
+                    [
+                        torrent_section,
+                        self._original_left_content,
+                    ],
+                    spacing=0,
+                    scroll=ft.ScrollMode.AUTO,
+                )
+            else:
+                # Restore the original content
+                if hasattr(self, '_original_left_content'):
+                    left_panel = main_content.controls[0]
+                    left_panel.content = self._original_left_content
+                    
+        self.update_ui()
+
+    def create_queue_item(self, item_id, title, download_path, item_type="video", torrent=None):
+        """Create a queue item container"""
+        try:
+            # Create progress bar
+            progress_bar = ft.ProgressBar(
+                width=None,
+                color="#1976D2",
+                bgcolor="#333333",
+                value=0,
+                height=4,
+            )
+            
+            # Create status text
+            status_text = ft.Text(
+                "Queued",
+                size=12,
+                color="white",
+            )
+            
+            # Create status container
+            status_container = ft.Container(
+                content=status_text,
+                bgcolor="#757575",
+                padding=ft.padding.all(3),
+                border_radius=ft.border_radius.all(4),
+            )
+            
+            # Create control buttons
+            pause_button = ft.IconButton(
+                icon=ft.Icons.PAUSE,
+                tooltip="Pause/Resume",
+                icon_color="#FFA000",
+                icon_size=18,
+                on_click=lambda e: self.pause_download(item_id),
+                disabled=True,
+            )
+            
+            stop_button = ft.IconButton(
+                icon=ft.Icons.STOP,
+                tooltip="Stop",
+                icon_color="#E53935",
+                icon_size=18,
+                on_click=lambda e: self.stop_download(item_id),
+                disabled=True,
+            )
+            
+            remove_button = ft.IconButton(
+                icon=ft.Icons.DELETE_OUTLINE,
+                tooltip="Remove",
+                icon_color="#757575",
+                icon_size=18,
+                on_click=lambda e: self.remove_from_queue(item_id),
+            )
+            
+            folder_button = ft.IconButton(
+                icon=ft.Icons.FOLDER_OPEN,
+                tooltip="Open Download Folder",
+                icon_color="#4FC3F7",
+                icon_size=18,
+                on_click=lambda e: self.open_download_folder(item_id),
+            )
+            
+            # Create item container
+            container = ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                # Title and type indicator
+                                ft.Column(
+                                    [
+                                        ft.Row(
+                                            [
+                                                ft.Icon(
+                                                    ft.Icons.FILE_DOWNLOAD if item_type == "video" else ft.Icons.DOWNLOADING,
+                                                    color="#bbbbbb",
+                                                    size=16,
+                                                ),
+                                                ft.Text(
+                                                    title,
+                                                    size=14,
+                                                    weight=ft.FontWeight.BOLD,
+                                                    color="white",
+                                                ),
+                                            ],
+                                            spacing=5,
+                                        ),
+                                        ft.Text(
+                                            download_path,
+                                            size=12,
+                                            color="#bbbbbb",
+                                        ),
+                                    ],
+                                    spacing=5,
+                                    expand=True,
+                                ),
+                                
+                                # Controls
+                                ft.Row(
+                                    [
+                                        status_container,
+                                        pause_button,
+                                        stop_button,
+                                        folder_button,
+                                        remove_button,
+                                    ],
+                                    spacing=5,
+                                ),
+                            ],
+                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        ),
+                        progress_bar,
+                    ],
+                    spacing=5,
+                ),
+                padding=10,
+                margin=ft.margin.only(bottom=5),
+                bgcolor="#1a1a1a",
+                border_radius=ft.border_radius.all(8),
+            )
+            
+            # Store references to controls
+            container.data = {
+                "id": item_id,
+                "type": item_type,
+                "progress_bar": progress_bar,
+                "status_text": status_text,
+                "status_container": status_container,
+                "pause_button": pause_button,
+                "stop_button": stop_button,
+                "download_path": download_path,
+                "torrent": torrent
+            }
+            
+            return container
+            
+        except Exception as e:
+            print(f"Error creating queue item: {str(e)}")
+            return None
+
+    def start_next_download(self):
+        """Start the next download in the queue"""
+        try:
+            # Find the next queued item
+            for item in self.video_queue:
+                if item["status"] == "queued":
+                    container = item["container"]
+                    item_id = item["id"]
+                    
+                    # Update status
+                    container.data["status_text"].value = "Starting..."
+                    container.data["status_container"].bgcolor = "#1976D2"
+                    container.data["pause_button"].disabled = False
+                    container.data["stop_button"].disabled = False
+                    self.update_ui()
+                    
+                    # Start download based on type
+                    if item["type"] == "torrent":
+                        self.start_torrent_download(item_id, container)
+                    else:
+                        self.start_video_download(item_id, container)
+                    
+                    break
+                    
+        except Exception as e:
+            print(f"Error starting next download: {str(e)}")
+    
+    def start_torrent_download(self, item_id, container):
+        """Start a torrent download"""
+        try:
+            torrent = container.data["torrent"]
+            if not torrent:
+                return
+                
+            # Mark as downloading
+            self.active_downloads[item_id] = {"status": "downloading"}
+            
+            def download_loop():
+                try:
+                    # Start the torrent
+                    torrent.start()
+                    
+                    # Update progress until complete or cancelled
+                    while (
+                        item_id in self.active_downloads
+                        and self.active_downloads[item_id]["status"] != "cancelled"
+                        and torrent.progress < 100
+                    ):
+                        if not torrent.is_paused:
+                            # Update progress
+                            container.data["progress_bar"].value = torrent.progress / 100
+                            
+                            # Update status text
+                            status = f"Downloading: {torrent.progress:.1f}% | ↓ {self.format_speed(torrent.download_speed)} ↑ {self.format_speed(torrent.upload_speed)}"
+                            container.data["status_text"].value = status
+                            
+                            # Update status color
+                            container.data["status_container"].bgcolor = "#1976D2"
+                            
+                            self.update_ui()
+                            
+                        time.sleep(0.5)
+                    
+                    # Check if cancelled
+                    if (
+                        item_id not in self.active_downloads
+                        or self.active_downloads[item_id]["status"] == "cancelled"
+                    ):
+                        container.data["status_text"].value = "Cancelled"
+                        container.data["status_container"].bgcolor = "#757575"
+                    else:
+                        container.data["status_text"].value = "Completed"
+                        container.data["status_container"].bgcolor = "#43A047"
+                        container.data["progress_bar"].value = 1
+                    
+                    # Cleanup
+                    if item_id in self.active_downloads:
+                        del self.active_downloads[item_id]
+                    
+                    # Disable controls
+                    container.data["pause_button"].disabled = True
+                    container.data["stop_button"].disabled = True
+                    
+                    self.update_ui()
+                    
+                    # Start next download
+                    self.start_next_download()
+                    
+                except Exception as e:
+                    print(f"Error in torrent download loop: {str(e)}")
+                    container.data["status_text"].value = f"Error: {str(e)}"
+                    container.data["status_container"].bgcolor = "#E53935"
+                    self.update_ui()
+            
+            # Start download thread
+            Thread(target=download_loop, daemon=True).start()
+            
+        except Exception as e:
+            print(f"Error starting torrent download: {str(e)}")
+            container.data["status_text"].value = f"Error: {str(e)}"
+            container.data["status_container"].bgcolor = "#E53935"
+            self.update_ui()
+    
+    def pause_download(self, item_id):
+        """Pause/Resume a download"""
+        try:
+            container = self.get_queue_control_by_id(item_id)
+            if not container:
+                return
+                
+            if container.data["type"] == "torrent":
+                torrent = container.data["torrent"]
+                if torrent:
+                    if torrent.is_paused:
+                        torrent.resume()
+                        container.data["pause_button"].icon = ft.Icons.PAUSE
+                        container.data["status_container"].bgcolor = "#1976D2"
+                    else:
+                        torrent.pause()
+                        container.data["pause_button"].icon = ft.Icons.PLAY_ARROW
+                        container.data["status_container"].bgcolor = "#FFA000"
+                    
+                    self.update_ui()
+            else:
+                # Handle video download pause/resume
+                if item_id in self.active_downloads:
+                    if self.active_downloads[item_id]["status"] == "paused":
+                        self.active_downloads[item_id]["status"] = "downloading"
+                        container.data["pause_button"].icon = ft.Icons.PAUSE
+                        container.data["status_container"].bgcolor = "#1976D2"
+                    else:
+                        self.active_downloads[item_id]["status"] = "paused"
+                        container.data["pause_button"].icon = ft.Icons.PLAY_ARROW
+                        container.data["status_container"].bgcolor = "#FFA000"
+                    
+                    self.update_ui()
+                    
+        except Exception as e:
+            print(f"Error pausing download: {str(e)}")
+    
+    def stop_download(self, item_id):
+        """Stop a download"""
+        try:
+            container = self.get_queue_control_by_id(item_id)
+            if not container:
+                return
+                
+            if container.data["type"] == "torrent":
+                torrent = container.data["torrent"]
+                if torrent:
+                    torrent.stop()
+            
+            if item_id in self.active_downloads:
+                self.active_downloads[item_id]["status"] = "cancelled"
+            
+            container.data["status_text"].value = "Stopped"
+            container.data["status_container"].bgcolor = "#757575"
+            container.data["pause_button"].disabled = True
+            container.data["stop_button"].disabled = True
+            
+            self.update_ui()
+            
+        except Exception as e:
+            print(f"Error stopping download: {str(e)}")
+    
+    def format_speed(self, bytes_per_sec):
+        """Format speed in bytes/sec to human readable format"""
+        if bytes_per_sec < 1024:
+            return f"{bytes_per_sec:.0f} B/s"
+        elif bytes_per_sec < 1024 * 1024:
+            return f"{bytes_per_sec/1024:.1f} KB/s"
+        else:
+            return f"{bytes_per_sec/(1024*1024):.1f} MB/s"
 
 def main(page: ft.Page):
     app = ModernYouTubeDownloader(page)
