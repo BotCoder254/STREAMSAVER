@@ -9,6 +9,7 @@ from datetime import datetime
 import yt_dlp
 from pytubefix import YouTube
 import traceback
+import urllib.parse
 
 # Import settings module
 try:
@@ -3140,6 +3141,58 @@ class ModernYouTubeDownloader:
                     self.update_ui()
         except Exception as e:
             print(f"Error toggling files section: {str(e)}")
+
+    def prepare_torrent(self, e=None):
+        """Prepare torrent for adding to queue by showing file selection dialog"""
+        link = self.magnet_input.value.strip()
+        if not link:
+            if self.on_action:
+                self.on_action({"type": "status", "message": "Please enter a magnet link or torrent URL"})
+            return
+            
+        try:
+            # Parse magnet link parameters safely
+            if link.startswith('magnet:?'):
+                params = {}
+                # Split parameters and handle each one
+                for param in link.replace('magnet:?', '').split('&'):
+                    if '=' in param:
+                        key, value = param.split('=', 1)
+                        params[key] = value
+                
+                # Get hash from xt parameter
+                info_hash = None
+                if 'xt' in params:
+                    xt = params['xt']
+                    if xt.startswith('urn:btih:'):
+                        info_hash = xt.replace('urn:btih:', '')
+                
+                # Get name from dn parameter
+                name = urllib.parse.unquote_plus(params.get('dn', 'Unknown'))
+                
+                # Create torrent instance with parsed data
+                t = TorrentDownloader(
+                    magnet_link=link,
+                    download_path=self.download_path.value
+                )
+                t.name = name
+                if info_hash:
+                    t.info_hash = info_hash
+            else:
+                # Handle direct torrent file URL or path
+                t = TorrentDownloader(
+                    torrent_path=link if os.path.exists(link) else None,
+                    magnet_link=link if link.startswith('http') else None,
+                    download_path=self.download_path.value
+                )
+            
+            self.current_torrent = t
+            self.show_file_selection_dialog(t)
+            
+        except Exception as e:
+            print(f"Error preparing torrent: {str(e)}")
+            self.status_text.value = f"Error preparing torrent: {str(e)}"
+            self.update_ui()
 
 def main(page: ft.Page):
     app = ModernYouTubeDownloader(page)

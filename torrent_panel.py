@@ -14,6 +14,7 @@ import random
 import time
 import sys
 import subprocess
+import urllib.parse
 
 class TorrentDownloader:
     def __init__(self, magnet_link=None, torrent_path=None, download_path=None):
@@ -76,9 +77,43 @@ class TorrentDownloader:
                 print(f"Error reading torrent file: {str(e)}")
                 self.files = []
         elif magnet_link:
-            self.info_hash = self._parse_magnet_link(magnet_link)
-            self.name = self._get_name_from_magnet(magnet_link)
-            
+            try:
+                # Parse magnet link
+                params = {}
+                for param in magnet_link.replace('magnet:?', '').split('&'):
+                    if '=' in param:
+                        key, value = param.split('=', 1)
+                        params[key] = value
+
+                # Get info hash
+                if 'xt' in params:
+                    xt = params['xt']
+                    if xt.startswith('urn:btih:'):
+                        self.info_hash = xt.replace('urn:btih:', '')
+                
+                # Get name
+                if 'dn' in params:
+                    self.name = urllib.parse.unquote_plus(params['dn'])
+                
+                # Initialize with dummy file for now
+                self.files = [{
+                    'path': f"{self.name}/unknown",
+                    'size': 0,
+                    'size_str': 'Unknown',
+                    'selected': True,
+                    'priority': 'Normal',
+                    'downloaded': 0
+                }]
+                
+                # Will be updated when torrent metadata is received
+                self.size = 0
+                self._total_selected_size = 0
+                
+            except Exception as e:
+                print(f"Error parsing magnet link: {str(e)}")
+                self.info_hash = None
+                self.name = "Unknown"
+        
     def _format_size(self, size):
         """Format size to human readable format"""
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
